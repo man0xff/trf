@@ -13,12 +13,22 @@ type Extractor struct {
 
 func convertTimeFormat(f string) string {
 	subs := []struct{ orig, new string }{
-		{"%Y", "2006"},
-		{"%m", "01"},
+		{"%a", "Mon"},
+		{"%A", "Monday"},
 		{"%d", "02"},
+		{"%_d", "_2"},
+		{"%b", "Jan"},
+		{"%B", "January"},
+		{"%m", "01"},
+		{"%y", "06"},
+		{"%Y", "2006"},
 		{"%H", "15"},
+		{"%I", "03"},
+		{"%p", "PM"},
 		{"%M", "04"},
 		{"%S", "05"},
+		{"%f", ".000000"},
+		{"%j", "002"},
 	}
 	for _, s := range subs {
 		f = strings.ReplaceAll(f, s.orig, s.new)
@@ -40,8 +50,10 @@ func NewExtractor(expr, format string) (Extractor, error) {
 }
 
 func (e *Extractor) extract(s string) (time.Time, bool) {
-	var err error
-	t := time.Time{}
+	var (
+		err error
+		t   time.Time
+	)
 
 	if e.regexp != nil {
 		m := e.regexp.FindStringSubmatch(s)
@@ -57,6 +69,11 @@ func (e *Extractor) extract(s string) (time.Time, bool) {
 	t, err = time.ParseInLocation(e.format, s, time.Now().Location())
 	if err != nil {
 		return t, false
+	}
+	if t.Year() == 0 {
+		now := time.Now()
+		t = time.Date(now.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(),
+			t.Second(), t.Nanosecond(), t.Location())
 	}
 	return t, true
 }

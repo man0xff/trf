@@ -7,29 +7,22 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
-
-	"github.com/recoilme/pudge"
 )
 
 type Config struct {
-	Concurrency int
-	TimeRange   TimeRange
-	CacheFile   string
-	Extractors  []*Extractor
-	Debug       bool
-	NoCache     bool
-	Lines       int
+	Concurrency  int
+	TimeRange    TimeRange
+	CacheFile    string
+	Extractors   []*Extractor
+	Debug        bool
+	NoCacheRead  bool
+	NoCacheWrite bool
+	Lines        int
 }
 
 type Filter struct {
 	config Config
-	db     *pudge.Db
-}
-
-type cacheData struct {
-	From  time.Time
-	To    time.Time
-	MTime time.Time
+	cache  *cache
 }
 
 type Input interface {
@@ -37,33 +30,25 @@ type Input interface {
 }
 
 func New(config *Config) *Filter {
-	var err error
-
 	f := &Filter{}
 	f.config = *config
 	if f.config.Concurrency <= 0 {
 		f.config.Concurrency = 1
 	}
-
-	if !f.config.NoCache {
-		f.db, err = pudge.Open(f.config.CacheFile, nil)
-		if err != nil {
-			f.error("database opening failed (file:'%s', reason:'%s')",
-				f.config.CacheFile, err)
-			f.db = nil
-		}
-	}
+	f.cache = newCache(f, f.config.CacheFile)
 	return f
 }
 
 func (f *Filter) Close() {
-	if f.db != nil {
-		f.db.Close()
-	}
+	f.cache.close()
 }
 
 func (f *Filter) error(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
+}
+
+func (f *Filter) warning(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
 }
 
 func (f *Filter) debug(format string, args ...interface{}) {
@@ -72,55 +57,16 @@ func (f *Filter) debug(format string, args ...interface{}) {
 	}
 }
 
-func (f *Filter) getFromCache(file string) (
-	mtime time.Time, tr TimeRange, ok bool,
-) {
-	if f.db == nil {
-		return
-	}
-
+func (f *Filter) getMTime(file string) (time.Time, bool) {
 	stat, err := os.Stat(file)
 	if err != nil {
 		f.error("stat file failed (file:'%s', reason:'%s')", file, err)
-		return
+		return time.Time{}, false
 	}
-	mtime = stat.ModTime()
-
-	data := cacheData{}
-	if err = f.db.Get(file, &data); err != nil {
-		if err != pudge.ErrKeyNotFound {
-			f.error("restoring from database failed "+
-				"(key:'%s', reason:'%s')", file, err)
-		}
-		return
-	}
-
-	if data.MTime != mtime {
-		return
-	}
-	tr.From = data.From
-	tr.To = data.To
-	ok = true
-	return
+	return stat.ModTime(), true
 }
 
-func (f *Filter) putToCache(file string, tr *TimeRange, mtime *time.Time) {
-	if f.db == nil {
-		return
-	}
-
-	data := cacheData{
-		From:  tr.From,
-		To:    tr.To,
-		MTime: *mtime,
-	}
-	if err := f.db.Set(file, &data); err != nil {
-		f.error("storing to database failed (key:'%s', reason:'%s')",
-			file, err)
-	}
-}
-
-func (f *Filter) extractTime(lines []string) time.Time {
+func (f *Filter) extractTime(lines []string, file string, loc string) time.Time {
 	for i, line := range lines {
 		for j, ex := range f.config.Extractors {
 			if t, ok := ex.extract(line); ok {
@@ -130,6 +76,8 @@ func (f *Filter) extractTime(lines []string) time.Time {
 			f.debug("  extractor %d miss on string %d -> %s", j, i, line)
 		}
 	}
+	f.warning("time information extracting failed "+
+		"(file:'%s', loc:'%s', lines:%d)", file, loc, len(lines))
 	return time.Time{}
 }
 
@@ -142,8 +90,8 @@ func (f *Filter) extractTimeRange(file string) (tr TimeRange, ok bool) {
 			"(file:'%s', reason:'%s')", file, err)
 		return
 	}
-	tr.From = f.extractTime(head)
-	tr.To = f.extractTime(tail)
+	tr.From = f.extractTime(head, file, "head")
+	tr.To = f.extractTime(tail, file, "tail")
 	if tr.From.After(tr.To) {
 		f.error("file time range is inversed (file:'%s')", file)
 		return
@@ -165,7 +113,6 @@ func (f *Filter) Do(in Input, out io.Writer) error {
 	var (
 		err           error
 		path, absPath string
-		mtime         time.Time
 		tr            TimeRange
 		ok            bool
 		wg            sync.WaitGroup
@@ -182,7 +129,8 @@ func (f *Filter) Do(in Input, out io.Writer) error {
 		}
 		f.debug("path: '%s'", path)
 
-		if mtime, tr, ok = f.getFromCache(absPath); ok {
+		mTime, _ := f.getMTime(absPath)
+		if tr, ok = f.cache.read(absPath, &mTime); ok {
 			f.debug("  time range: %s (cache)", &tr)
 			if f.intersects(&tr) {
 				fmt.Println(path)
@@ -200,13 +148,13 @@ func (f *Filter) Do(in Input, out io.Writer) error {
 
 			if tr, ok := f.extractTimeRange(absPath); ok {
 				f.debug("  time range: %s", &tr)
-				f.putToCache(absPath, &tr, &mtime)
+				f.cache.write(absPath, &tr, &mtime)
 				if !f.intersects(&tr) {
 					return
 				}
 			}
 			fmt.Fprintln(out, path)
-		}(path, absPath, mtime)
+		}(path, absPath, mTime)
 	}
 	return nil
 }

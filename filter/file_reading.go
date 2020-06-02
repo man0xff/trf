@@ -24,7 +24,9 @@ func readHead(f *os.File, n int) ([]string, error) {
 			return nil, err
 		}
 		line = strings.TrimRight(line, "\n")
-		head = append(head, line)
+		if line != "" {
+			head = append(head, line)
+		}
 	}
 	return head, nil
 }
@@ -51,7 +53,9 @@ func readTail(f *os.File, n int) ([]string, error) {
 		lines = lines[:len(lines)-1]
 	}
 	for i := len(lines) - 1; i >= 0 && len(tail) < n; i-- {
-		tail = append(tail, string(lines[i]))
+		if len(lines[i]) != 0 {
+			tail = append(tail, string(lines[i]))
+		}
 	}
 	return tail, nil
 }
